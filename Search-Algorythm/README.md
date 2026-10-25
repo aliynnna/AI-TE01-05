@@ -41,6 +41,8 @@ Pastikan **Python 3** sudah terpasang di komputer Anda. Buka terminal pada folde
    ```bash
    python bfs.py
 2. **Menjalankan DFS:**
+    ```bash
    python dfs.py
 4. **Menjalankan UCF:**
+    ```bash
    python ucs.py
