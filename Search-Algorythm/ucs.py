@@ -1,33 +1,58 @@
 import heapq
 
-def ucs(graph, start, goal):
-    # priority queue: (cost, current_path)
-    pqueue = [(0, [start])]
-    visited = {}
+# Peta rute (semua kunci dan nama dibuat standar huruf kecil di dalam program)
+peta_asli = {
+    'Rumah': [('Halte', 2), ('Pasar', 5)],
+    'Halte': [('Stasiun', 4)],
+    'Pasar': [('Kampus', 6)],
+    'Stasiun': [('Kampus', 1)],
+    'Kampus': []
+}
 
-    while pqueue:
-        cost, path = heapq.heappop(pqueue)
-        node = path[-1]
+def cari_rute_termurah(peta, awal, tujuan):
+    # Buat peta versi huruf kecil agar pencarian fleksibel
+    graph = {k.lower(): [(t[0].lower(), t[1]) for t in v] for k, v in peta.items()}
+    
+    start = awal.lower().strip()
+    goal = tujuan.lower().strip()
 
-        if node == goal:
-            return path, cost
+    # Validasi apakah nama lokasi ada di peta
+    if start not in graph or goal not in graph:
+        return None, float('inf')
 
-        if node not in visited or cost < visited[node]:
-            visited[node] = cost
-            for neighbor, edge_cost in graph.get(node, []):
-                new_path = list(path)
-                new_path.append(neighbor)
-                heapq.heappush(pqueue, (cost + edge_cost, new_path))
+    # Antrean: (total_ongkos, tempat_sekarang, [jalur])
+    antrean = [(0, start, [start.capitalize()])]
+    sudah_dikunjungi = set()
+
+    while antrean:
+        ongkos, tempat, jalur = heapq.heappop(antrean)
+
+        if tempat == goal:
+            return jalur, ongkos
+
+        if tempat not in sudah_dikunjungi:
+            sudah_dikunjungi.add(tempat)
+
+            for tetangga, tarif in graph.get(tempat, []):
+                if tetangga not in sudah_dikunjungi:
+                    jalur_baru = list(jalur)
+                    jalur_baru.append(tetangga.capitalize())
+                    heapq.heappush(antrean, (ongkos + tarif, tetangga, jalur_baru))
+
     return None, float('inf')
 
+
 if __name__ == "__main__":
-    graph = {
-        'A': [('B', 1), ('C', 4)],
-        'B': [('D', 2), ('E', 5)],
-        'C': [('F', 3)],
-        'D': [('F', 6)],
-        'E': [('F', 1)],
-        'F': []
-    }
-    path, cost = ucs(graph, 'A', 'F')
-    print(f"UCS Path: {' -> '.join(path)} (Total Cost: {cost})")
+    print("Pilihan lokasi: Rumah, Halte, Pasar, Stasiun, Kampus\n")
+    
+    awal = input("Masukkan lokasi awal: ")
+    tujuan = input("Masukkan lokasi tujuan: ")
+
+    jalur, total_ongkos = cari_rute_termurah(peta_asli, awal, tujuan)
+
+    if jalur:
+        print("\n=== HASIL PENCARIAN UCS ===")
+        print("Rute Paling Hemat :", " -> ".join(jalur))
+        print(f"Total Ongkos      : Rp{total_ongkos}.000")
+    else:
+        print("\nRute tidak ditemukan atau nama lokasi salah.")
