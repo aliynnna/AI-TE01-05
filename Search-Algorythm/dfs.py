@@ -1,30 +1,33 @@
-def dfs(graph, start, goal):
-    stack = [[start]]
-    visited = set()
+# Denah tempat dan isinya
+tempat = {
+    'Ruang Tamu': ['Kamar Tidur', 'Dapur'],
+    'Kamar Tidur': ['Lemari Baju'],
+    'Lemari Baju': ['Baju'],
+    'Dapur': ['Kulkas'],
+    'Kulkas': ['Kue']
+}
 
-    while stack:
-        path = stack.pop()
-        node = path[-1]
+# Ketik barang yang dicari (misal ketik: Kue atau Baju)
+yang_dicari = input("Mau cari apa? ")
 
-        if node == goal:
-            return path
+# Tumpukan DFS (dimulai dari pintu masuk)
+tumpukan = ['Ruang Tamu']
+ketemu = False
 
-        if node not in visited:
-            visited.add(node)
-            for neighbor in reversed(graph.get(node, [])):
-                new_path = list(path)
-                new_path.append(neighbor)
-                stack.append(new_path)
-    return None
+while tumpukan:
+    # Ciri khas DFS: ambil yang paling atas / terakhir masuk (.pop())
+    lokasi = tumpukan.pop()
+    print("Membuka:", lokasi)
 
-if __name__ == "__main__":
-    graph = {
-        'A': ['B', 'C'],
-        'B': ['D', 'E'],
-        'C': ['F'],
-        'D': [],
-        'E': ['F'],
-        'F': []
-    }
-    path = dfs(graph, 'A', 'F')
-    print("DFS Path:", " -> ".join(path) if path else "Not found")
+    # Cek apakah lokasinya pas dengan barang yang dicari
+    if lokasi.lower() == yang_dicari.lower():
+        print(f"Hore! '{lokasi}' berhasil ditemukan!")
+        ketemu = True
+        break
+
+    # Masukkan isi ruangan ke tumpukan untuk ditelusuri sampai mentok
+    for isi in tempat.get(lokasi, []):
+        tumpukan.append(isi)
+
+if not ketemu:
+    print(f"Barang '{yang_dicari}' tidak ada di mana pun.")
