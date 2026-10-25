@@ -1,32 +1,22 @@
 from collections import deque
 
-def bfs(graph, start, goal):
-    visited = set()
-    queue = deque([[start]])
+antrean = deque(["Alyn", "Nabila", "Shafa"])
 
-    while queue:
-        path = queue.popleft()
-        node = path[-1]
+yang_dicari = input("Mau cari siapa? ")
 
-        if node == goal:
-            return path
+nomor = 1
+ketemu = False
 
-        if node not in visited:
-            visited.add(node)
-            for neighbor in graph.get(node, []):
-                new_path = list(path)
-                new_path.append(neighbor)
-                queue.append(new_path)
-    return None
+while antrean:
+    orang = antrean.popleft()
+    print("Memeriksa:", orang)
 
-if __name__ == "__main__":
-    graph = {
-        'A': ['B', 'C'],
-        'B': ['D', 'E'],
-        'C': ['F'],
-        'D': [],
-        'E': ['F'],
-        'F': []
-    }
-    path = bfs(graph, 'A', 'F')
-    print("BFS Path:", " -> ".join(path) if path else "Not found")
+    if orang.lower() == yang_dicari.lower():
+        print("Ketemu!", orang, "ada di urutan ke-", nomor)
+        ketemu = True
+        break
+
+    nomor += 1
+
+if not ketemu:
+    print("Nama tidak ada di antrean.")
