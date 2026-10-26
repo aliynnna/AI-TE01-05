@@ -5,6 +5,9 @@ class Agent:
     def kerja(self, input_data):
         raise NotImplementedError
 
+    def __call__(self, input_data):
+        return self.kerja(input_data)
+
 
 class Peneliti(Agent):
     def kerja(self, topik):
@@ -26,13 +29,11 @@ class Reviewer(Agent):
         return draft + " (DITOLAK)"
 
 
-# --- Jalankan ---
 peneliti = Peneliti("Peneliti")
 penulis = Penulis("Penulis")
 reviewer = Reviewer("Reviewer")
 
-hasil = "multi agent system"
-for agent in [peneliti, penulis, reviewer]:
-    hasil = agent.kerja(hasil)
-
+# --- Jalankan ---
+topik = input("Masukkan topik: ")   # kamu ketik: multi agent system
+hasil = reviewer(penulis(peneliti(topik)))
 print("\nHasil akhir:", hasil)
