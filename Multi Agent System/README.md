@@ -1,4 +1,4 @@
-# Contoh Sederhana Multi-Agent System
+# Multi-Agent System
 
 Proyek ini adalah contoh sederhana **multi-agent system** dengan Python. Beberapa agent bekerja secara berurutan (pipeline), dan keluaran dari satu agent menjadi masukan bagi agent berikutnya.
 
