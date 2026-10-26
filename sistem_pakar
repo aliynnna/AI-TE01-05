@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SISTEM PAKAR DIAGNOSA AWAL KESEHATAN v2
+=======================================
+Fitur:
+  * Basis pengetahuan disimpan di database SQLite (gejala, penyakit, aturan, red flag)
+  * Inferensi Certainty Factor (CF) ala MYCIN + faktor cakupan gejala + penalti gejala khas
+  * Skala jawaban bertingkat (0-3), bukan sekadar y/n
+  * Pertanyaan ADAPTIF: pertanyaan berikutnya dipilih berdasarkan kandidat penyakit teratas
+  * Deteksi "red flag" (tanda bahaya) -> triase otomatis
+  * Modifier umur, kondisi risiko tinggi, dan lama demam
+  * Riwayat konsultasi tersimpan di database
+
+Cara pakai:
+  python sistem_pakar.py          -> mode interaktif
+  python sistem_pakar.py --demo   -> jalankan 4 skenario contoh otomatis
+  python sistem_pakar.py --riwayat-> tampilkan riwayat konsultasi
+
+PENTING: Ini proyek edukasi. Bobot gejala adalah ilustrasi dan BUKAN pengganti
+diagnosis tenaga medis. Jika kondisi memburuk, segera ke fasilitas kesehatan.
+"""
+
+import argparse
+import json
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import datetime
+
+DB_PATH = "sistem_pakar.db"
+
+# Skala jawaban pengguna -> CF pengguna
+SKALA = {
+    0: ("Tidak", 0.0),
+    1: ("Ragu-ragu / ringan", 0.4),
+    2: ("Ya", 0.7),
+    3: ("Ya, jelas / parah", 1.0),
+}
+
+# =====================================================================
+# 1. DATA AWAL (SEED) BASIS PENGETAHUAN
+# =====================================================================
+
+# (kode, nama, pertanyaan, gejala_skrining)
+GEJALA = [
+    ("S01", "Demam", "demam / badan terasa panas", 1),
+    ("S02", "Menggigil", "menggigil", 0),
+    ("S03", "Batuk kering", "batuk kering", 1),
+    ("S04", "Batuk berdahak", "batuk berdahak", 0),
+    ("S05", "Hidung tersumbat / pilek", "hidung tersumbat atau pilek", 1),
+    ("S06", "Bersin-bersin", "bersin-bersin berulang", 0),
+    ("S07", "Sakit tenggorokan", "sakit tenggorokan, terutama saat menelan", 1),
+    ("S08", "Sesak napas", "sesak napas", 0),
+    ("S09", "Nyeri dada", "nyeri atau rasa berat di dada", 0),
+    ("S10", "Sakit kepala", "sakit kepala", 1),
+    ("S11", "Nyeri otot / sendi", "nyeri otot atau sendi", 0),
+    ("S12", "Badan lemas", "badan lemas / mudah lelah", 0),
+    ("S13", "Mual", "mual", 0),
+    ("S14", "Muntah", "muntah", 0),
+    ("S15", "Diare", "diare / BAB cair", 1),
+    ("S16", "Nyeri ulu hati", "nyeri atau perih di ulu hati", 0),
+    ("S17", "Nyeri perut", "nyeri perut / kram perut", 1),
+    ("S18", "Ruam kulit", "ruam atau bintik merah di kulit", 0),
+    ("S19", "Nyeri belakang mata", "nyeri di belakang bola mata", 0),
+    ("S20", "Perdarahan", "mimisan, gusi berdarah, atau mudah memar", 0),
+    ("S21", "Hilang penciuman/perasa", "hilangnya kemampuan mencium bau atau merasakan", 0),
+    ("S22", "Mengi", "napas berbunyi 'ngik-ngik' (mengi)", 0),
+    ("S23", "Nyeri/tekanan wajah", "nyeri atau rasa penuh di area pipi/dahi/hidung", 0),
+    ("S24", "Mata gatal/berair", "mata gatal dan berair", 0),
+    ("S25", "Sensitif cahaya/suara", "sangat terganggu oleh cahaya atau suara", 0),
+    ("S26", "Nafsu makan turun", "nafsu makan menurun", 0),
+    ("S27", "Demam naik bertahap", "demam yang naik bertahap, terutama sore/malam, beberapa hari", 0),
+    ("S28", "Tanda dehidrasi", "mulut sangat kering / jarang buang air kecil / pusing saat berdiri", 0),
+    ("S29", "Kebingungan / penurunan kesadaran", "kebingungan, sangat mengantuk, atau sulit dibangunkan", 0),
+    ("S30", "Bibir/ujung jari kebiruan", "bibir atau ujung jari tampak kebiruan", 0),
+]
+
+# (kode, nama, deskripsi, keparahan 1-3, saran, kapan_ke_dokter)
+PENYAKIT = [
+    ("D01", "Common Cold (Pilek Biasa)", "Infeksi virus ringan pada saluran napas atas.", 1,
+     "Istirahat cukup, perbanyak minum air hangat, jaga tubuh tetap hangat, konsumsi makanan bergizi.",
+     "Gejala lebih dari 10 hari, demam tinggi, atau muncul sesak napas."),
+    ("D02", "Influenza", "Infeksi virus influenza dengan gejala sistemik yang lebih berat dari pilek biasa.", 2,
+     "Istirahat total, banyak minum, obat pereda demam/nyeri sesuai aturan pakai di kemasan, hindari kontak dengan orang lain.",
+     "Demam tinggi lebih dari 3 hari, sesak napas, atau kondisi memburuk setelah sempat membaik."),
+    ("D03", "Faringitis (Radang Tenggorokan)", "Peradangan tenggorokan akibat virus atau bakteri.", 1,
+     "Istirahat, minum air hangat, hindari gorengan dan minuman dingin, berkumur air garam hangat.",
+     "Nyeri sangat hebat, sulit menelan/membuka mulut, atau tidak membaik dalam 5 hari (perlu dinilai kemungkinan infeksi bakteri)."),
+    ("D04", "Bronkitis Akut", "Peradangan saluran napas bawah, ditandai batuk berdahak.", 2,
+     "Banyak minum, istirahat, hindari asap rokok dan debu.",
+     "Batuk lebih dari 3 minggu, dahak berdarah, sesak napas, atau demam tinggi."),
+    ("D05", "Pneumonia (Radang Paru)", "Infeksi pada paru yang dapat serius dan butuh penanganan medis.", 3,
+     "Segera periksa ke dokter untuk pemeriksaan fisik dan foto toraks.",
+     "Segera, terutama bila ada sesak napas atau nyeri dada."),
+    ("D06", "COVID-19", "Infeksi SARS-CoV-2; gejala sangat bervariasi.", 2,
+     "Isolasi mandiri, pakai masker, banyak minum dan istirahat, lakukan tes antigen/PCR.",
+     "Sesak napas, nyeri dada, bibir kebiruan, atau penurunan kesadaran."),
+    ("D07", "Demam Berdarah Dengue (DBD)", "Infeksi virus dengue yang ditularkan nyamuk Aedes.", 3,
+     "Segera periksa laboratorium (trombosit/hematokrit). Perbanyak cairan. Hindari aspirin/ibuprofen kecuali atas anjuran dokter.",
+     "Segera, terutama saat demam mulai turun (fase kritis, hari ke-3 s.d. ke-7), ada perdarahan, atau nyeri perut hebat."),
+    ("D08", "Demam Tifoid (Tifus)", "Infeksi bakteri Salmonella typhi lewat makanan/minuman terkontaminasi.", 3,
+     "Periksa ke dokter (tes darah/kultur), istirahat, makanan lunak, jaga kebersihan makanan.",
+     "Segera bila demam lebih dari 3 hari, nyeri perut hebat, atau BAB berdarah."),
+    ("D09", "Gastroenteritis (Radang Lambung-Usus)", "Infeksi saluran cerna, ditandai diare, mual, dan muntah.", 2,
+     "Minum oralit/cairan sedikit-sedikit tapi sering, makanan lunak, cuci tangan, hindari makanan pedas dan berminyak.",
+     "Tanda dehidrasi, BAB berdarah, diare lebih dari 2 hari, atau pada bayi/lansia."),
+    ("D10", "Dispepsia / Maag", "Gangguan lambung dengan nyeri atau perih ulu hati.", 1,
+     "Makan teratur dalam porsi kecil, hindari pedas, asam, kopi, dan alkohol; jangan langsung berbaring setelah makan.",
+     "Muntah darah, BAB hitam, berat badan turun tanpa sebab, atau nyeri tidak membaik."),
+    ("D11", "Migrain", "Sakit kepala berdenyut, sering disertai mual dan sensitif cahaya/suara.", 1,
+     "Istirahat di ruangan gelap dan tenang, kompres dingin di dahi, cukup minum dan tidur.",
+     "Sakit kepala hebat mendadak, disertai kelemahan anggota tubuh, gangguan bicara, atau demam dan kaku leher."),
+    ("D12", "Rinitis Alergi", "Reaksi alergi pada hidung dan mata.", 1,
+     "Hindari pemicu (debu, serbuk sari, bulu hewan), bilas hidung dengan larutan garam, konsultasikan antihistamin.",
+     "Gejala menetap berminggu-minggu atau mengganggu tidur dan aktivitas."),
+    ("D13", "Asma", "Penyempitan saluran napas yang menimbulkan mengi dan sesak.", 3,
+     "Jauhi pemicu, gunakan obat pelega bila sudah diresepkan dokter, duduk tegak dan atur napas.",
+     "Segera bila sesak berat, bicara terputus-putus, atau obat pelega tidak membantu."),
+    ("D14", "Sinusitis", "Peradangan rongga sinus; nyeri/tekanan wajah dan hidung tersumbat.", 1,
+     "Kompres hangat di wajah, uap air hangat, banyak minum, bilas hidung dengan larutan garam.",
+     "Gejala lebih dari 10 hari, demam tinggi, atau pembengkakan di sekitar mata."),
+]
+
+# Aturan pakar: bobot (0-1) tiap gejala terhadap penyakit
+ATURAN = {
+    "D01": {"S05": .8, "S06": .6, "S07": .4, "S03": .3, "S01": .15, "S12": .2},
+    "D02": {"S01": .8, "S02": .5, "S11": .7, "S10": .5, "S12": .6, "S03": .5, "S05": .3, "S07": .3},
+    "D03": {"S07": .9, "S01": .5, "S10": .2, "S13": .1, "S05": .1},
+    "D04": {"S04": .8, "S03": .3, "S12": .4, "S01": .3, "S09": .3, "S08": .3, "S07": .2},
+    "D05": {"S01": .7, "S02": .5, "S04": .6, "S08": .7, "S09": .5, "S12": .5, "S30": .3},
+    "D06": {"S01": .6, "S03": .6, "S21": .8, "S12": .5, "S11": .4, "S10": .3, "S07": .3, "S08": .4, "S15": .15},
+    "D07": {"S01": .8, "S19": .6, "S20": .7, "S18": .5, "S10": .5, "S11": .5, "S13": .4, "S17": .3, "S12": .4},
+    "D08": {"S27": .8, "S01": .5, "S17": .5, "S10": .4, "S26": .5, "S15": .3, "S12": .4, "S13": .3},
+    "D09": {"S15": .9, "S14": .6, "S13": .6, "S17": .6, "S01": .3, "S28": .4, "S12": .3},
+    "D10": {"S16": .9, "S13": .5, "S17": .5, "S26": .3, "S14": .2},
+    "D11": {"S10": .9, "S25": .7, "S13": .5, "S14": .3},
+    "D12": {"S06": .8, "S24": .8, "S05": .6, "S03": .2},
+    "D13": {"S22": .9, "S08": .7, "S03": .5, "S09": .3},
+    "D14": {"S23": .8, "S05": .6, "S10": .5, "S01": .3, "S04": .2},
+}
+
+# (kode, pesan, [gejala yang harus ada semua], CF pengguna minimum)
+RED_FLAGS = [
+    ("RF1", "Bibir/ujung jari kebiruan menandakan kekurangan oksigen.", ["S30"], 0.7),
+    ("RF2", "Kebingungan atau penurunan kesadaran adalah tanda bahaya.", ["S29"], 0.7),
+    ("RF3", "Sesak napas disertai nyeri dada perlu evaluasi darurat.", ["S08", "S09"], 0.7),
+    ("RF4", "Demam disertai perdarahan: waspada DBD atau gangguan pembekuan darah.", ["S01", "S20"], 0.7),
+    ("RF5", "Muntah disertai tanda dehidrasi: risiko dehidrasi berat.", ["S14", "S28"], 0.7),
+    ("RF6", "Mengi disertai sesak napas berat: kemungkinan serangan asma berat.", ["S22", "S08"], 1.0),
+]
+
+# Pertanyaan keselamatan yang selalu ditanyakan bila ada gejala
+GEJALA_KESELAMATAN = ["S08", "S09", "S28", "S29", "S30", "S20"]
+
+# Parameter mesin inferensi
+MAKS_PERTANYAAN_ADAPTIF = 10
+AMBANG_YAKIN = 0.60       # skor penyakit teratas
+AMBANG_SELISIH = 0.20     # selisih dengan kandidat kedua
+BOBOT_KHAS = 0.7          # gejala dengan bobot >= ini dianggap "khas"
+PENALTI_KHAS = 0.40       # pengurang bila gejala khas dijawab "Tidak"
+
+
+# =====================================================================
+# 2. LAPISAN DATABASE
+# =====================================================================
+
+def init_db(path=DB_PATH):
+    """Buat skema dan isi data awal bila database masih kosong."""
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    cur = conn.cursor()
+    cur.executescript("""
+    CREATE TABLE IF NOT EXISTS gejala(
+        kode TEXT PRIMARY KEY, nama TEXT NOT NULL,
+        pertanyaan TEXT NOT NULL, skrining INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS penyakit(
+        kode TEXT PRIMARY KEY, nama TEXT NOT NULL, deskripsi TEXT,
+        keparahan INTEGER NOT NULL, saran TEXT, kapan_ke_dokter TEXT);
+    CREATE TABLE IF NOT EXISTS aturan(
+        penyakit TEXT NOT NULL REFERENCES penyakit(kode),
+        gejala TEXT NOT NULL REFERENCES gejala(kode),
+        bobot REAL NOT NULL CHECK(bobot > 0 AND bobot <= 1),
+        PRIMARY KEY(penyakit, gejala));
+    CREATE TABLE IF NOT EXISTS red_flag(
+        kode TEXT PRIMARY KEY, pesan TEXT NOT NULL, min_cf REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS red_flag_gejala(
+        red_flag TEXT NOT NULL REFERENCES red_flag(kode),
+        gejala TEXT NOT NULL REFERENCES gejala(kode),
+        PRIMARY KEY(red_flag, gejala));
+    CREATE TABLE IF NOT EXISTS riwayat(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, waktu TEXT NOT NULL,
+        umur INTEGER, risiko_tinggi INTEGER, durasi_demam INTEGER,
+        fakta TEXT NOT NULL, hasil TEXT NOT NULL, triase TEXT NOT NULL);
+    """)
+    if cur.execute("SELECT COUNT(*) FROM penyakit").fetchone()[0] == 0:
+        cur.executemany("INSERT INTO gejala VALUES (?,?,?,?)", GEJALA)
+        cur.executemany("INSERT INTO penyakit VALUES (?,?,?,?,?,?)", PENYAKIT)
+        for p, daftar in ATURAN.items():
+            cur.executemany("INSERT INTO aturan VALUES (?,?,?)",
+                            [(p, g, w) for g, w in daftar.items()])
+        for kode, pesan, gejala, min_cf in RED_FLAGS:
+            cur.execute("INSERT INTO red_flag VALUES (?,?,?)", (kode, pesan, min_cf))
+            cur.executemany("INSERT INTO red_flag_gejala VALUES (?,?)",
+                            [(kode, g) for g in gejala])
+    conn.commit()
+    return conn
+
+
+@dataclass
+class Gejala:
+    kode: str
+    nama: str
+    pertanyaan: str
+    skrining: bool
+
+
+@dataclass
+class Penyakit:
+    kode: str
+    nama: str
+    deskripsi: str
+    keparahan: int
+    saran: str
+    kapan_ke_dokter: str
+    aturan: dict = field(default_factory=dict)  # kode gejala -> bobot
+
+    @property
+    def total_bobot(self):
+        return sum(self.aturan.values())
+
+
+@dataclass
+class RedFlag:
+    kode: str
+    pesan: str
+    gejala: list
+    min_cf: float
+
+
+class BasisPengetahuan:
+    """Memuat seluruh pengetahuan dari database ke memori."""
+
+    def __init__(self, conn):
+        self.gejala = {r[0]: Gejala(r[0], r[1], r[2], bool(r[3]))
+                       for r in conn.execute("SELECT kode,nama,pertanyaan,skrining FROM gejala")}
+        self.penyakit = {r[0]: Penyakit(*r) for r in conn.execute(
+            "SELECT kode,nama,deskripsi,keparahan,saran,kapan_ke_dokter FROM penyakit")}
+        for p, g, w in conn.execute("SELECT penyakit,gejala,bobot FROM aturan"):
+            self.penyakit[p].aturan[g] = w
+        rf = {r[0]: RedFlag(r[0], r[1], [], r[2])
+              for r in conn.execute("SELECT kode,pesan,min_cf FROM red_flag")}
+        for k, g in conn.execute("SELECT red_flag,gejala FROM red_flag_gejala"):
+            rf[k].gejala.append(g)
+        self.red_flags = list(rf.values())
+
+    def gejala_skrining(self):
+        return [g.kode for g in self.gejala.values() if g.skrining]
+
+
+# =====================================================================
+# 3. MESIN INFERENSI
+# =====================================================================
+
+@dataclass
+class Hasil:
+    penyakit: Penyakit
+    skor: float
+    cakupan: float
+    gejala_cocok: list
+
+
+class MesinInferensi:
+    def __init__(self, kb):
+        self.kb = kb
+        self.fakta = {}             # kode gejala -> CF pengguna (0..1)
+        self.umur = None
+        self.risiko_tinggi = False
+        self.durasi_demam = 0
+
+    # ---- fakta ----
+    def set_fakta(self, kode, cf):
+        self.fakta[kode] = cf
+
+    def sudah_ditanya(self, kode):
+        return kode in self.fakta
+
+    def ada_gejala_positif(self):
+        return any(v > 0 for v in self.fakta.values())
+
+    # ---- perhitungan skor penyakit ----
+    def _skor(self, p):
+        cf, cocok, penalti, daftar = 0.0, 0.0, 1.0, []
+        for g, w in p.aturan.items():
+            u = self.fakta.get(g)
+            if u is None:
+                continue
+            if u > 0:
+                cf = cf + (w * u) * (1 - cf)       # kombinasi CF paralel (MYCIN)
+                cocok += w * u
+                daftar.append(g)
+            elif w >= BOBOT_KHAS:
+                penalti *= (1 - PENALTI_KHAS * w)  # gejala khas tidak ada -> turunkan
+        cakupan = cocok / p.total_bobot
+        skor = cf * (0.6 + 0.4 * cakupan) * penalti
+        skor *= self._modifier(p)
+        return min(skor, 0.99), cakupan, daftar
+
+    def _modifier(self, p):
+        """Penyesuaian kontekstual berdasarkan lama demam."""
+        m = 1.0
+        if self.durasi_demam >= 3:
+            if p.kode in ("D07", "D08"):
+                m *= 1.15
+            elif p.kode in ("D01", "D03"):
+                m *= 0.85
+        return m
+
+    def hitung(self):
+        hasil = []
+        for p in self.kb.penyakit.values():
+            skor, cakupan, daftar = self._skor(p)
+            if skor > 0:
+                hasil.append(Hasil(p, skor, cakupan, daftar))
+        hasil.sort(key=lambda h: h.skor, reverse=True)
+        return hasil
+
+    # ---- red flag & triase ----
+    def red_flags_terpicu(self):
+        out = []
+        for rf in self.kb.red_flags:
+            if all(self.fakta.get(g, 0) >= rf.min_cf for g in rf.gejala):
+                out.append(rf)
+        return out
+
+    def triase(self, hasil):
+        """1 = rawat mandiri, 2 = konsultasi dokter, 3 = segera ke IGD."""
+        if self.red_flags_terpicu():
+            return 3
+        level = 1
+        if hasil:
+            top = hasil[0]
+            level = {1: 1, 2: 2, 3: 2}[top.penyakit.keparahan]
+            if top.penyakit.keparahan == 3 and top.skor >= 0.6:
+                level = 3
+            if top.penyakit.keparahan >= 2 and top.skor < 0.25:
+                level = max(1, level - 1)
+        if self.risiko_tinggi or (self.umur is not None and (self.umur <= 5 or self.umur >= 60)):
+            if hasil:
+                level = min(3, level + 1)
+        if self.durasi_demam >= 3:
+            level = max(level, 2)
+        return level
+
+    # ---- pemilihan pertanyaan adaptif ----
+    def pertanyaan_berikutnya(self):
+        hasil = self.hitung()
+        kandidat = hasil[:5]
+        belum = [g for g in self.kb.gejala if not self.sudah_ditanya(g)]
+        if not belum:
+            return None
+        best, best_val = None, 0.0
+        for g in belum:
+            val = 0.0
+            for h in kandidat:
+                w = h.penyakit.aturan.get(g, 0)
+                val += (h.skor + 0.1) * w
+            if val > best_val:
+                best, best_val = g, val
+        return best
+
+    def cukup_yakin(self, hasil):
+        if not hasil:
+            return False
+        if hasil[0].skor < AMBANG_YAKIN:
+            return False
+        if len(hasil) == 1:
+            return True
+        return hasil[0].skor - hasil[1].skor >= AMBANG_SELISIH
+
+
+# =====================================================================
+# 4. ANTARMUKA (INTERAKTIF & DEMO)
+# =====================================================================
+
+class IOInteraktif:
+    def profil(self):
+        umur = self._angka("Umur Anda (tahun): ", 0, 120)
+        print("Apakah Anda sedang hamil atau punya penyakit penyerta")
+        r = input("(diabetes, jantung, asma, ginjal, daya tahan tubuh lemah)? (y/n): ").strip().lower()
+        return umur, r == "y"
+
+    def skala(self, gejala):
+        print(f"\nApakah Anda mengalami {gejala.pertanyaan}?")
+        for k, (label, _) in SKALA.items():
+            print(f"   [{k}] {label}")
+        while True:
+            s = input("   Pilihan (0-3): ").strip()
+            if s in ("0", "1", "2", "3"):
+                return int(s)
+            print("   Input tidak valid, ketik angka 0 sampai 3.")
+
+    def durasi(self):
+        return self._angka("Sudah berapa hari Anda demam? ", 0, 60)
+
+    @staticmethod
+    def _angka(prompt, lo, hi):
+        while True:
+            s = input(prompt).strip()
+            if s.isdigit() and lo <= int(s) <= hi:
+                return int(s)
+            print(f"   Masukkan angka {lo}-{hi}.")
+
+
+class IODemo:
+    def __init__(self, umur, risiko, jawaban, durasi=0):
+        self.umur, self.risiko, self.jawaban, self._durasi = umur, risiko, jawaban, durasi
+
+    def profil(self):
+        return self.umur, self.risiko
+
+    def skala(self, gejala):
+        return self.jawaban.get(gejala.kode, 0)
+
+    def durasi(self):
+        return self._durasi
+
+
+# =====================================================================
+# 5. SESI KONSULTASI
+# =====================================================================
+
+def tampilkan_hasil(mesin, hasil, level):
+    print("\n" + "=" * 64)
+    print("                      HASIL ANALISIS")
+    print("=" * 64)
+
+    rf = mesin.red_flags_terpicu()
+    if rf:
+        print("\n!! TANDA BAHAYA TERDETEKSI !!")
+        for r in rf:
+            print(f"   - {r.pesan}")
+
+    if not hasil:
+        print("\nTidak ada penyakit di basis pengetahuan yang cocok dengan gejala Anda.")
+        if not mesin.ada_gejala_positif():
+            print("Anda tampaknya dalam kondisi sehat. Pertahankan pola hidup sehat!")
+        else:
+            print("Kombinasi gejala ini perlu evaluasi dokter.")
+    else:
+        print("\nKemungkinan penyakit (diurutkan):")
+        for i, h in enumerate(hasil[:5], 1):
+            bar = "#" * int(h.skor * 20)
+            print(f"  {i}. {h.penyakit.nama:<38} {h.skor*100:5.1f}%  |{bar:<20}|")
+            if i == 1:
+                nama = [mesin.kb.gejala[g].nama for g in h.gejala_cocok]
+                print(f"     Gejala cocok: {', '.join(nama)}")
+        top = hasil[0].penyakit
+        print(f"\nDugaan terkuat : {top.nama}")
+        print(f"Penjelasan     : {top.deskripsi}")
+        print(f"Saran          : {top.saran}")
+        print(f"Segera ke dokter bila: {top.kapan_ke_dokter}")
+        if len(hasil) > 1 and hasil[0].skor - hasil[1].skor < 0.10:
+            print(f"\nCatatan: skor {hasil[1].penyakit.nama} sangat dekat; "
+                  "keduanya perlu dipertimbangkan.")
+
+    label = {1: "RENDAH - perawatan mandiri sambil dipantau",
+             2: "SEDANG - sebaiknya konsultasi ke dokter dalam 1-2 hari",
+             3: "TINGGI - segera ke IGD / fasilitas kesehatan terdekat"}[level]
+    print(f"\nTingkat urgensi: {label}")
+    print("-" * 64)
+    print("Sistem ini hanya alat bantu edukasi, bukan pengganti diagnosis dokter.")
+    print("=" * 64)
+
+
+def simpan_riwayat(conn, mesin, hasil, level):
+    ringkas = [{"penyakit": h.penyakit.nama, "skor": round(h.skor, 3)} for h in hasil[:5]]
+    conn.execute(
+        "INSERT INTO riwayat(waktu,umur,risiko_tinggi,durasi_demam,fakta,hasil,triase) VALUES (?,?,?,?,?,?,?)",
+        (datetime.now().isoformat(timespec="seconds"), mesin.umur, int(mesin.risiko_tinggi),
+         mesin.durasi_demam, json.dumps(mesin.fakta), json.dumps(ringkas, ensure_ascii=False), str(level)))
+    conn.commit()
+
+
+def konsultasi(conn, io, verbose=True):
+    kb = BasisPengetahuan(conn)
+    mesin = MesinInferensi(kb)
+
+    if verbose:
+        print("=" * 64)
+        print("     SISTEM PAKAR DIAGNOSA AWAL KESEHATAN v2 (Certainty Factor)")
+        print("=" * 64)
+        print("Jawab pertanyaan dengan skala: 0=Tidak, 1=Ragu/ringan, 2=Ya, 3=Ya jelas/parah\n")
+
+    mesin.umur, mesin.risiko_tinggi = io.profil()
+
+    def tanya(kode):
+        if mesin.sudah_ditanya(kode):
+            return
+        mesin.set_fakta(kode, SKALA[io.skala(kb.gejala[kode])][1])
+
+    # Tahap 1: skrining keluhan umum
+    for kode in kb.gejala_skrining():
+        tanya(kode)
+
+    if mesin.fakta.get("S01", 0) > 0:
+        mesin.durasi_demam = io.durasi()
+
+    # Tahap 2: pertanyaan adaptif
+    if mesin.ada_gejala_positif():
+        for _ in range(MAKS_PERTANYAAN_ADAPTIF):
+            if mesin.cukup_yakin(mesin.hitung()):
+                break
+            nxt = mesin.pertanyaan_berikutnya()
+            if nxt is None:
+                break
+            tanya(nxt)
+
+        # Tahap 3: pertanyaan keselamatan (tanda bahaya)
+        for kode in GEJALA_KESELAMATAN:
+            tanya(kode)
+
+    hasil = mesin.hitung()
+    level = mesin.triase(hasil)
+    if verbose:
+        tampilkan_hasil(mesin, hasil, level)
+    simpan_riwayat(conn, mesin, hasil, level)
+    return mesin, hasil, level
+
+
+def tampilkan_riwayat(conn):
+    rows = conn.execute("SELECT id,waktu,umur,hasil,triase FROM riwayat ORDER BY id DESC LIMIT 20").fetchall()
+    if not rows:
+        print("Belum ada riwayat konsultasi.")
+        return
+    for id_, waktu, umur, hasil, triase in rows:
+        h = json.loads(hasil)
+        top = h[0]["penyakit"] if h else "-"
+        print(f"#{id_:<3} {waktu}  umur={umur}  dugaan={top}  urgensi={triase}")
+
+
+# =====================================================================
+# 6. DEMO
+# =====================================================================
+
+SKENARIO = [
+    ("Demam berdarah (demam 4 hari, nyeri belakang mata, ruam)", IODemo(
+        22, False, {"S01": 3, "S10": 2, "S11": 3, "S19": 2, "S18": 2, "S12": 2, "S13": 1}, durasi=4)),
+    ("Pilek biasa", IODemo(
+        30, False, {"S05": 3, "S06": 3, "S07": 1, "S03": 1})),
+    ("Gastroenteritis", IODemo(
+        27, False, {"S15": 3, "S17": 2, "S13": 2, "S14": 2, "S28": 0})),
+    ("Tanda bahaya (sesak + nyeri dada)", IODemo(
+        58, True, {"S08": 3, "S09": 2, "S03": 2, "S01": 2}, durasi=2)),
+]
+
+
+def jalankan_demo(conn):
+    for judul, io in SKENARIO:
+        print(f"\n\n######## SKENARIO: {judul} ########")
+        konsultasi(conn, io, verbose=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Sistem Pakar Diagnosa Awal Kesehatan v2")
+    ap.add_argument("--demo", action="store_true", help="jalankan skenario contoh")
+    ap.add_argument("--riwayat", action="store_true", help="tampilkan riwayat konsultasi")
+    ap.add_argument("--db", default=DB_PATH, help="lokasi file database")
+    args = ap.parse_args()
+
+    conn = init_db(args.db)
+    if args.riwayat:
+        tampilkan_riwayat(conn)
+    elif args.demo:
+        jalankan_demo(conn)
+    else:
+        konsultasi(conn, IOInteraktif())
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()
+
