@@ -41,11 +41,6 @@ for agent in [peneliti, penulis, reviewer]:
     hasil = agent.kerja(hasil)
 ```
 
-## Prasyarat
-
-- Python 3.6 atau lebih baru (menggunakan f-string)
-- Tidak membutuhkan library tambahan
-
 ## Cara Menjalankan
 
 ```bash
@@ -83,18 +78,3 @@ penerjemah = Penerjemah("Penerjemah")
 for agent in [peneliti, penulis, reviewer, penerjemah]:
     hasil = agent.kerja(hasil)
 ```
-
-## Catatan
-
-Kode ini hanya simulasi untuk pembelajaran. Agent tidak benar-benar mencari informasi di internet atau menggunakan model AI. Untuk sistem nyata, isi method `kerja()` dapat diganti dengan pemanggilan API LLM, pencarian web, atau logika lain.
-
-## Pengembangan Lanjutan
-
-- Menghubungkan agent dengan LLM (misalnya melalui API)
-- Menambahkan alur revisi: jika `Reviewer` menolak, draft dikembalikan ke `Penulis`
-- Menjalankan agent secara paralel atau asinkron
-- Menambahkan memori bersama antar agent
-
-## Lisensi
-
-Bebas digunakan untuk keperluan belajar.
